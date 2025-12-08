@@ -1,0 +1,29 @@
+{
+  "name": "langchain-chrome-extension",
+  "version": "1.0.0",
+  "description": "Chrome extension to chat about any webpage using LangChain and Gemini",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [
+    "chrome-extension",
+    "langchain",
+    "gemini",
+    "ai"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@langchain/core": "^1.1.4",
+    "@langchain/google-genai": "^2.0.4",
+    "langchain": "^1.1.5",
+    "lucide": "^0.556.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.2.1",
+    "vite": "^7.2.7"
+  }
+}
