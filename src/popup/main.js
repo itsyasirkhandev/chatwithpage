@@ -589,6 +589,292 @@ let documentSummary = null;  // Store generated summary
 let useHybridMode = false;  // Track hybrid mode (summary + search)
 let needsMoreDetail = false;  // Track if LLM requested more info
 
+// Model fallback chain
+const MODEL_FALLBACK_CHAIN = [
+  { name: 'gemini-2.5-flash-lite', displayName: 'Gemini 2.5 Flash Lite', speed: 'Fastest' },
+  { name: 'gemini-2.5-flash', displayName: 'Gemini 2.5 Flash', speed: 'Fast' },
+  { name: 'gemini-2.0-flash-lite', displayName: 'Gemini 2.0 Flash Lite', speed: 'Fast' },
+  { name: 'gemini-2.0-flash', displayName: 'Gemini 2.0 Flash', speed: 'Balanced' }
+];
+
+let currentModelIndex = 0;  // Start with first model in chain
+let lastFailedQuestion = null;  // Store last question that failed due to rate limit
+let isHandlingRateLimit = false;  // Flag to prevent multiple simultaneous rate limit handlers
+let rateLimitPromptShown = false;  // Flag to prevent showing prompt multiple times for same failure
+
+// Request tracking for smart rate limit detection
+let activeRequestId = null;  // Current active request ID
+let lastRateLimitTime = 0;  // Timestamp of last rate limit detection
+const RATE_LIMIT_COOLDOWN = 3000;  // 3 seconds between rate limit detections
+
+// Get current model name
+function getCurrentModel() {
+  return MODEL_FALLBACK_CHAIN[currentModelIndex].name;
+}
+
+// Get next available model
+function getNextModel() {
+  if (currentModelIndex < MODEL_FALLBACK_CHAIN.length - 1) {
+    return MODEL_FALLBACK_CHAIN[currentModelIndex + 1];
+  }
+  return null;
+}
+
+// Switch to next model
+async function switchToNextModel() {
+  const nextModel = getNextModel();
+  if (nextModel) {
+    currentModelIndex++;
+    console.log(`🔄 Switching to model: ${nextModel.name}`);
+    
+    // Reinitialize chain with new model
+    const apiKey = await getApiKey();
+    if (useHybridMode) {
+      initLangChainHybrid(apiKey);
+    } else if (isLongDocument) {
+      initLangChainRAG(apiKey);
+    } else if (useSummaryMode) {
+      initLangChainSummary(apiKey);
+    } else {
+      initLangChainStuffing(apiKey);
+    }
+    
+    return true;
+  }
+  return false;
+}
+
+// Show final rate limit message when all models are exhausted
+function showFinalRateLimitMessage() {
+  const rateLimitDiv = document.createElement('div');
+  rateLimitDiv.className = 'message rate-limit-message';
+  rateLimitDiv.innerHTML = `
+    <div class="rate-limit-header">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <strong>All Models Rate Limited</strong>
+    </div>
+    <div class="rate-limit-content">
+      <p><strong>All available models have reached their rate limits.</strong></p>
+      
+      <div class="rate-limit-details">
+        <h4>📊 Models Tried:</h4>
+        <ul>
+          ${MODEL_FALLBACK_CHAIN.map((m, i) => `<li><strong>${m.displayName}</strong> - ${m.speed}</li>`).join('')}
+        </ul>
+      </div>
+      
+      <div class="rate-limit-actions">
+        <h4>⏱️ What to do now:</h4>
+        <ol>
+          <li><strong>Wait 60 seconds</strong> before sending another message</li>
+          <li>Try spacing out your questions (one every 4-5 seconds)</li>
+          <li><a href="https://aistudio.google.com/apikey" target="_blank">Check your quota usage</a></li>
+          <li>Consider upgrading for higher limits</li>
+        </ol>
+      </div>
+      
+      <div class="rate-limit-tip">
+        💡 <strong>Pro tip:</strong> The extension caches content, so reopening doesn't use API calls!
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.appendChild(rateLimitDiv);
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  
+  toast.error('All Models Rate Limited', 'Please wait 60 seconds before trying again.', 8000);
+}
+
+// Show model switch prompt UI
+function showModelSwitchPrompt() {
+  const nextModel = getNextModel();
+  if (!nextModel) {
+    // No more models to fallback to
+    showFinalRateLimitMessage();
+    return;
+  }
+  
+  const currentModel = MODEL_FALLBACK_CHAIN[currentModelIndex];
+  
+  const switchPromptDiv = document.createElement('div');
+  switchPromptDiv.className = 'message model-switch-prompt';
+  switchPromptDiv.innerHTML = `
+    <div class="model-switch-header">
+      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="23 4 23 10 17 10"/>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+      <strong>Model Rate Limited</strong>
+    </div>
+    <div class="model-switch-content">
+      <p><strong>${currentModel.displayName}</strong> has reached its rate limit.</p>
+      <p>Would you like to switch to the next available model?</p>
+      
+      <div class="model-switch-info">
+        <div class="model-current">
+          <span class="model-label">Current:</span>
+          <span class="model-name">${currentModel.displayName}</span>
+          <span class="model-speed">${currentModel.speed}</span>
+        </div>
+        <div class="model-arrow">→</div>
+        <div class="model-next">
+          <span class="model-label">Switch to:</span>
+          <span class="model-name">${nextModel.displayName}</span>
+          <span class="model-speed">${nextModel.speed}</span>
+        </div>
+      </div>
+      
+      <div class="model-switch-actions">
+        <button class="btn-switch-model" data-action="switch">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+          Switch Model & Continue
+        </button>
+        <button class="btn-cancel-switch" data-action="cancel">Cancel</button>
+      </div>
+    </div>
+  `;
+  
+  messagesDiv.appendChild(switchPromptDiv);
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+  
+  // Add event listeners
+  const switchBtn = switchPromptDiv.querySelector('.btn-switch-model');
+  const cancelBtn = switchPromptDiv.querySelector('.btn-cancel-switch');
+  
+  switchBtn.addEventListener('click', async () => {
+    switchPromptDiv.remove();
+    
+    // Reset flags for next attempt
+    rateLimitPromptShown = false;
+    isHandlingRateLimit = false;
+    lastRateLimitTime = 0;  // Reset cooldown timer
+    
+    const switched = await switchToNextModel();
+    if (switched) {
+      toast.success('Model Switched', `Now using ${nextModel.displayName}`, 3000);
+      
+      // Retry the last failed question if available
+      if (lastFailedQuestion) {
+        const question = lastFailedQuestion;
+        lastFailedQuestion = null;
+        
+        // Add small delay to allow model initialization
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Set the input value and trigger send
+        userInput.value = question;
+        await handleSend();
+      }
+    }
+  });
+  
+  cancelBtn.addEventListener('click', () => {
+    switchPromptDiv.remove();
+    
+    // Reset flags
+    rateLimitPromptShown = false;
+    isHandlingRateLimit = false;
+    lastFailedQuestion = null;
+    activeRequestId = null;
+    lastRateLimitTime = 0;
+    
+    toast.info('Cancelled', 'Model switch cancelled. Wait 60 seconds and try again.', 3000);
+  });
+}
+
+// Intercept fetch to detect 429 errors immediately
+const originalFetch = window.fetch;
+window.fetch = async function(...args) {
+  try {
+    const response = await originalFetch.apply(this, args);
+    
+    // Check if this is a Gemini API call that got rate limited
+    if (response.status === 429 && args[0].includes('generativelanguage.googleapis.com')) {
+      
+      // GUARD 1: Must have an active request (not stale error)
+      if (!activeRequestId) {
+        console.log('⏭️ Ignoring stale 429 error (no active request)');
+        return response;
+      }
+      
+      // GUARD 2: Cooldown period to prevent spam
+      const now = Date.now();
+      const timeSinceLastDetection = now - lastRateLimitTime;
+      
+      if (timeSinceLastDetection < RATE_LIMIT_COOLDOWN) {
+        console.log(`⏳ Ignoring 429 (cooldown: ${Math.round(timeSinceLastDetection/1000)}s/${RATE_LIMIT_COOLDOWN/1000}s)`);
+        return response;
+      }
+      
+      // GUARD 3: Already handling
+      if (isHandlingRateLimit) {
+        console.log('⏭️ Already handling rate limit');
+        return response;
+      }
+      
+      // ✅ NEW RATE LIMIT DETECTED
+      console.log('🚨 NEW rate limit detected for active request!');
+      
+      // Clear console of old errors
+      if (typeof console.clear === 'function') {
+        console.clear();
+        console.log('🧹 Console cleared - showing fresh rate limit info');
+      }
+      
+      lastRateLimitTime = now;
+      isHandlingRateLimit = true;
+      
+      // Show model switch prompt immediately (delay slightly to ensure DOM is ready)
+      setTimeout(() => {
+        // Remove typing indicator if it exists
+        const indicator = messagesDiv?.querySelector('.typing-indicator');
+        if (indicator) {
+          indicator.remove();
+        }
+        
+        // Re-enable send button
+        if (sendBtn) {
+          sendBtn.disabled = false;
+        }
+        
+        // Store question if available (check last sent message)
+        if (!lastFailedQuestion) {
+          const messages = messagesDiv?.querySelectorAll('.message.user');
+          if (messages && messages.length > 0) {
+            const lastUserMessage = messages[messages.length - 1];
+            lastFailedQuestion = lastUserMessage.textContent?.trim();
+          }
+        }
+        
+        // Check if there's a next model available
+        const nextModel = getNextModel();
+        if (nextModel && !rateLimitPromptShown) {
+          // Show switch prompt only once
+          rateLimitPromptShown = true;
+          showModelSwitchPrompt();
+          toast.warning('Rate Limit Reached', 'Model rate limited. Switch to continue.', 5000);
+        } else if (!nextModel) {
+          // All models exhausted - show final message
+          rateLimitPromptShown = false;  // Reset for next time
+          isHandlingRateLimit = false;
+          showFinalRateLimitMessage();
+        }
+      }, 100);
+    }
+    
+    return response;
+  } catch (error) {
+    console.error('Fetch interceptor error:', error);
+    throw error;
+  }
+};
+
 // Initialize
 async function init() {
   // Initialize DOM elements first
@@ -1042,6 +1328,13 @@ async function processPageContent(apiKey) {
 // Generate a high-density summary for borderline documents
 async function generateSummary(markdown, apiKey, targetSize = 'standard') {
   try {
+    // If markdown is extremely large (> 100k chars), use smart truncation first
+    let processedMarkdown = markdown;
+    if (markdown.length > 100000) {
+      console.log('📝 Document very large (> 100k chars), applying smart truncation for summary...');
+      processedMarkdown = await truncateMarkdownSafely(markdown, 100000);
+    }
+    
     const model = new ChatGoogleGenerativeAI({
       model: 'gemini-2.5-flash',  // Use fast model for summarization
       apiKey: apiKey,
@@ -1066,7 +1359,7 @@ DO NOT:
 - List every example
 
 WEBPAGE CONTENT:
-${markdown}
+${processedMarkdown}
 
 COMPACT SUMMARY:`;
     } else {
@@ -1086,7 +1379,7 @@ DO NOT:
 - Add your own commentary
 
 WEBPAGE CONTENT:
-${markdown}
+${processedMarkdown}
 
 DETAILED SUMMARY:`;
     }
@@ -1094,8 +1387,8 @@ DETAILED SUMMARY:`;
     const response = await model.invoke(summaryPrompt);
     documentSummary = response.content;
     
-    console.log(`Generated ${targetSize} summary: ${documentSummary.length} chars (original: ${markdown.length} chars)`);
-    console.log(`Token reduction: ${Math.round(markdown.length/4)} → ${Math.round(documentSummary.length/4)} tokens`);
+    console.log(`Generated ${targetSize} summary: ${documentSummary.length} chars (original: ${markdown.length} chars, processed: ${processedMarkdown.length} chars)`);
+    console.log(`Token reduction: ${Math.round(processedMarkdown.length/4)} → ${Math.round(documentSummary.length/4)} tokens`);
     
   } catch (error) {
     console.error('Error generating summary:', error);
@@ -1105,24 +1398,120 @@ DETAILED SUMMARY:`;
   }
 }
 
-// Setup RAG pipeline: split, embed, store
-async function setupRAGPipeline(markdown, apiKey) {
+// Calculate optimal chunk size and overlap based on document size
+// Overlap is always 10-20% of chunk size for optimal context preservation
+// Smaller docs use smaller chunks (better granularity) with higher overlap (more context)
+// Larger docs use larger chunks (efficiency) with lower overlap (less redundancy)
+function getOptimalChunkConfig(documentLength, useLargeChunks = false) {
+  let chunkSize;
+  let overlapPercent = 15; // 15% is middle of 10-20% range
+  
+  if (useLargeChunks) {
+    // For truncation - use larger chunks to preserve more context when combining
+    if (documentLength < 30000) {
+      chunkSize = 1500;
+    } else if (documentLength < 80000) {
+      chunkSize = 2500;
+    } else if (documentLength < 150000) {
+      chunkSize = 3500;
+    } else {
+      chunkSize = 5000;
+    }
+  } else {
+    // For RAG/retrieval - balanced chunks for better search
+    if (documentLength < 20000) {
+      chunkSize = 500;
+      overlapPercent = 20; // Smaller docs need more overlap
+    } else if (documentLength < 50000) {
+      chunkSize = 800;
+      overlapPercent = 18;
+    } else if (documentLength < 100000) {
+      chunkSize = 1200;
+      overlapPercent = 15;
+    } else if (documentLength < 200000) {
+      chunkSize = 1800;
+      overlapPercent = 12;
+    } else {
+      chunkSize = 2500;
+      overlapPercent = 10;
+    }
+  }
+  
+  const chunkOverlap = Math.round(chunkSize * (overlapPercent / 100));
+  
+  console.log(`📊 Chunk config: size=${chunkSize}, overlap=${chunkOverlap} (${overlapPercent}%) for doc length=${documentLength.toLocaleString()} chars`);
+  
+  return { chunkSize, chunkOverlap };
+}
+
+// Smart truncation using markdown-aware splitting
+async function truncateMarkdownSafely(markdown, maxChars = 50000) {
   try {
-    // Step 1: Split text into chunks
-    const textSplitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 1000,
-      chunkOverlap: 200,
+    // If already small enough, return as-is
+    if (markdown.length <= maxChars) {
+      return markdown;
+    }
+    
+    // Get optimal chunk config for truncation (use larger chunks)
+    const { chunkSize, chunkOverlap } = getOptimalChunkConfig(markdown.length, true);
+    
+    // Use markdown-aware splitting to get clean chunks
+    const textSplitter = RecursiveCharacterTextSplitter.fromLanguage('markdown', {
+      chunkSize,
+      chunkOverlap,
     });
     
     const docs = await textSplitter.createDocuments([markdown]);
+    const chunks = docs.map(doc => doc.pageContent);
     
-    // Step 2: Create embeddings
+    // Combine chunks until we reach maxChars
+    let truncated = '';
+    for (const chunk of chunks) {
+      if (truncated.length + chunk.length <= maxChars) {
+        truncated += chunk + '\n\n';
+      } else {
+        // Add partial chunk if we have room
+        const remaining = maxChars - truncated.length;
+        if (remaining > 500) {  // Only add if we have meaningful space
+          truncated += chunk.substring(0, remaining);
+        }
+        break;
+      }
+    }
+    
+    console.log(`📝 Smart truncation: ${markdown.length} → ${truncated.length} chars (preserved markdown structure)`);
+    return truncated + '\n\n... [content truncated at natural markdown boundary]';
+    
+  } catch (error) {
+    console.error('Error in smart truncation:', error);
+    // Fallback to simple truncation
+    return markdown.substring(0, maxChars) + '... [content truncated]';
+  }
+}
+
+// Setup RAG pipeline: split, embed, store
+async function setupRAGPipeline(markdown, apiKey) {
+  try {
+    // Step 1: Get optimal chunk configuration based on document size
+    const { chunkSize, chunkOverlap } = getOptimalChunkConfig(markdown.length, false);
+    
+    // Step 2: Split text into chunks with markdown-aware splitting
+    const textSplitter = RecursiveCharacterTextSplitter.fromLanguage('markdown', {
+      chunkSize,
+      chunkOverlap,
+    });
+    
+    console.log('📝 Using markdown-aware text splitting for RAG pipeline');
+    
+    const docs = await textSplitter.createDocuments([markdown]);
+    
+    // Step 3: Create embeddings
     const embedder = new GoogleGenerativeAIEmbeddings({
       apiKey: apiKey,
       modelName: 'text-embedding-004',
     });
     
-    // Step 3: Embed all chunks and store them
+    // Step 4: Embed all chunks and store them
     const chunks = docs.map(doc => doc.pageContent);
     const embeddings = await Promise.all(
       chunks.map(chunk => embedder.embedQuery(chunk))
@@ -1175,60 +1564,108 @@ function cosineSimilarity(vecA, vecB) {
 
 // Retrieve relevant chunks based on query
 async function retrieveRelevantChunks(query, k = 4, scoreThreshold = 0.5) {
+  // Validation 1: Check if vector store exists
   if (!vectorStore) {
-    console.warn('Vector store not initialized');
+    console.warn('❌ Vector store not initialized');
     return [];
   }
   
-  if (!vectorStore.embeddings || !vectorStore.chunks || vectorStore.embeddings.length === 0) {
-    console.warn('Vector store is empty or invalid');
+  // Validation 2: Check if vector store has required properties
+  if (!vectorStore.embeddings || !vectorStore.chunks || !vectorStore.embedder) {
+    console.warn('❌ Vector store is missing required properties', {
+      hasEmbeddings: !!vectorStore.embeddings,
+      hasChunks: !!vectorStore.chunks,
+      hasEmbedder: !!vectorStore.embedder
+    });
+    return [];
+  }
+  
+  // Validation 3: Check if embeddings array is not empty
+  if (vectorStore.embeddings.length === 0) {
+    console.warn('❌ Vector store embeddings array is empty');
+    return [];
+  }
+  
+  // Validation 4: Check if embedder has embedQuery method
+  if (typeof vectorStore.embedder.embedQuery !== 'function') {
+    console.error('❌ Embedder does not have embedQuery method');
     return [];
   }
   
   try {
     // Embed the query
+    console.log('🔍 Embedding query:', query.substring(0, 50) + '...');
     const queryEmbedding = await vectorStore.embedder.embedQuery(query);
     
-    if (!queryEmbedding || !Array.isArray(queryEmbedding)) {
-      console.error('Invalid query embedding');
+    // Validation 5: Check if query embedding is valid
+    if (!queryEmbedding || !Array.isArray(queryEmbedding) || queryEmbedding.length === 0) {
+      console.error('❌ Invalid query embedding generated', {
+        type: typeof queryEmbedding,
+        isArray: Array.isArray(queryEmbedding),
+        length: queryEmbedding?.length
+      });
       return [];
     }
     
+    console.log(`✓ Query embedding generated: ${queryEmbedding.length} dimensions`);
+    
     // Calculate similarities for all chunks
     const similarities = vectorStore.embeddings.map((embedding, index) => {
-      if (!embedding || !Array.isArray(embedding)) {
-        console.warn(`Invalid embedding at index ${index}`);
-        return { chunk: vectorStore.chunks[index], score: 0, index };
+      // Skip invalid embeddings
+      if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+        console.warn(`⚠️ Invalid embedding at index ${index}`);
+        return { chunk: vectorStore.chunks[index] || '', score: 0, index };
       }
       
+      // Skip if dimensions don't match
+      if (embedding.length !== queryEmbedding.length) {
+        console.warn(`⚠️ Dimension mismatch at index ${index}: ${embedding.length} vs ${queryEmbedding.length}`);
+        return { chunk: vectorStore.chunks[index] || '', score: 0, index };
+      }
+      
+      const score = cosineSimilarity(queryEmbedding, embedding);
       return {
-        chunk: vectorStore.chunks[index],
-        score: cosineSimilarity(queryEmbedding, embedding),
+        chunk: vectorStore.chunks[index] || '',
+        score: isNaN(score) ? 0 : score,
         index
       };
     });
     
-    // Filter by threshold and sort by score
-    const filtered = similarities
-      .filter(item => item.score >= scoreThreshold)
+    // Filter valid results only
+    const validSimilarities = similarities.filter(item => 
+      item.chunk && 
+      typeof item.score === 'number' && 
+      !isNaN(item.score) &&
+      item.score >= scoreThreshold
+    );
+    
+    if (validSimilarities.length === 0) {
+      console.warn('⚠️ No chunks passed similarity threshold');
+      return [];
+    }
+    
+    // Sort and get top k
+    const filtered = validSimilarities
       .sort((a, b) => b.score - a.score)
       .slice(0, k);
     
-    console.log(`Retrieved ${filtered.length} chunks with scores:`, filtered.map(f => f.score.toFixed(3)));
+    console.log(`✓ Retrieved ${filtered.length} chunks with scores:`, filtered.map(f => f.score.toFixed(3)));
     
     return filtered.map(item => item.chunk);
   } catch (error) {
-    console.error('Error retrieving chunks:', error);
+    console.error('❌ Error retrieving chunks:', error);
+    console.error('Stack trace:', error.stack);
     return [];
   }
 }
 
 // Initialize LangChain for Path A: Stuffing
 function initLangChainStuffing(apiKey) {
-  console.log('Initializing LangChain in Stuffing mode');
+  const currentModel = getCurrentModel();
+  console.log(`Initializing LangChain in Stuffing mode with ${currentModel}`);
   
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-2.5-flash-lite',
+    model: currentModel,
     apiKey: apiKey,
     streaming: true,
   });
@@ -1255,8 +1692,11 @@ function initLangChainStuffing(apiKey) {
 
 // Initialize LangChain for Path B: Summary Mode
 function initLangChainSummary(apiKey) {
+  const currentModel = getCurrentModel();
+  console.log(`Initializing LangChain in Summary mode with ${currentModel}`);
+  
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-2.5-flash-lite',
+    model: currentModel,
     apiKey: apiKey,
     streaming: true,
   });
@@ -1281,10 +1721,11 @@ function initLangChainSummary(apiKey) {
 
 // Initialize LangChain for Hybrid Mode (Summary-first with retrieval fallback)
 function initLangChainHybrid(apiKey) {
-  console.log('Initializing LangChain in Hybrid mode');
+  const currentModel = getCurrentModel();
+  console.log(`Initializing LangChain in Hybrid mode with ${currentModel}`);
   
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-2.5-flash-lite',
+    model: currentModel,
     apiKey: apiKey,
     streaming: true,
   });
@@ -1311,10 +1752,11 @@ function initLangChainHybrid(apiKey) {
 
 // Initialize LangChain for Path C: RAG
 function initLangChainRAG(apiKey) {
-  console.log('Initializing LangChain in RAG mode');
+  const currentModel = getCurrentModel();
+  console.log(`Initializing LangChain in RAG mode with ${currentModel}`);
   
   const model = new ChatGoogleGenerativeAI({
-    model: 'gemini-2.5-flash-lite',
+    model: currentModel,
     apiKey: apiKey,
     streaming: true,
   });
@@ -1438,6 +1880,10 @@ async function handleSend() {
   const typingIndicator = showTypingIndicator();
   sendBtn.disabled = true;
 
+  // Generate unique request ID for rate limit tracking
+  activeRequestId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  console.log('📤 Starting request:', activeRequestId);
+
   try {
     let context;
     let fullResponse = '';
@@ -1457,21 +1903,27 @@ async function handleSend() {
       messagesDiv.appendChild(messageDiv);
 
       console.log('Calling chain.stream() with hybrid mode...');
-      const stream = await chain.stream({
-        context: context,
-        question: question,
-        history: chatHistory,
-      });
+      try {
+        const stream = await chain.stream({
+          context: context,
+          question: question,
+          history: chatHistory,
+        });
 
-      console.log('Stream received, processing chunks...');
-      let chunkCount = 0;
-      for await (const chunk of stream) {
-        chunkCount++;
-        fullResponse += chunk;
-        renderMarkdownToElement(messageDiv, fullResponse);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        console.log('Stream received, processing chunks...');
+        let chunkCount = 0;
+        for await (const chunk of stream) {
+          chunkCount++;
+          fullResponse += chunk;
+          renderMarkdownToElement(messageDiv, fullResponse);
+          messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        console.log(`Received ${chunkCount} chunks, total response length: ${fullResponse.length}`);
+      } catch (streamError) {
+        // Rethrow to be caught by outer catch block
+        console.error('Stream error in hybrid mode:', streamError);
+        throw streamError;
       }
-      console.log(`Received ${chunkCount} chunks, total response length: ${fullResponse.length}`);
 
       // Step 2: Check if LLM requested more detail
       if (fullResponse.includes('🔍 NEEDS_DETAIL:')) {
@@ -1489,7 +1941,7 @@ async function handleSend() {
         if (retrievedContext) {
           // Create new chain for retrieval response
           const retrievalModel = new ChatGoogleGenerativeAI({
-            model: 'gemini-2.5-flash-lite',
+            model: getCurrentModel(),
             apiKey: await getApiKey(),
             streaming: true,
           });
@@ -1512,16 +1964,21 @@ async function handleSend() {
             new StringOutputParser(),
           ]);
 
-          const retrievalStream = await retrievalChain.stream({
-            question: question,
-            history: chatHistory,
-          });
+          try {
+            const retrievalStream = await retrievalChain.stream({
+              question: question,
+              history: chatHistory,
+            });
 
-          fullResponse = '';
-          for await (const chunk of retrievalStream) {
-            fullResponse += chunk;
-            renderMarkdownToElement(messageDiv, fullResponse);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            fullResponse = '';
+            for await (const chunk of retrievalStream) {
+              fullResponse += chunk;
+              renderMarkdownToElement(messageDiv, fullResponse);
+              messagesDiv.scrollTop = messagesDiv.scrollHeight;
+            }
+          } catch (retrievalError) {
+            console.error('Stream error in hybrid retrieval:', retrievalError);
+            throw retrievalError;
           }
         } else {
           renderMarkdownToElement(messageDiv, 'Could not find specific details. The summary may be your best answer.');
@@ -1541,16 +1998,21 @@ async function handleSend() {
       typingIndicator.remove();
       messagesDiv.appendChild(messageDiv);
 
-      const stream = await chain.stream({
-        context: context,
-        question: question,
-        history: chatHistory,
-      });
+      try {
+        const stream = await chain.stream({
+          context: context,
+          question: question,
+          history: chatHistory,
+        });
 
-      for await (const chunk of stream) {
-        fullResponse += chunk;
-        renderMarkdownToElement(messageDiv, fullResponse);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        for await (const chunk of stream) {
+          fullResponse += chunk;
+          renderMarkdownToElement(messageDiv, fullResponse);
+          messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+      } catch (streamError) {
+        console.error('Stream error in summary mode:', streamError);
+        throw streamError;
       }
 
       chatHistory.push(new HumanMessage(question));
@@ -1570,16 +2032,21 @@ async function handleSend() {
       typingIndicator.remove();
       messagesDiv.appendChild(messageDiv);
 
-      const stream = await chain.stream({
-        context: context,
-        question: question,
-        history: chatHistory,
-      });
+      try {
+        const stream = await chain.stream({
+          context: context,
+          question: question,
+          history: chatHistory,
+        });
 
-      for await (const chunk of stream) {
-        fullResponse += chunk;
-        renderMarkdownToElement(messageDiv, fullResponse);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        for await (const chunk of stream) {
+          fullResponse += chunk;
+          renderMarkdownToElement(messageDiv, fullResponse);
+          messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+      } catch (streamError) {
+        console.error('Stream error in RAG mode:', streamError);
+        throw streamError;
       }
 
       chatHistory.push(new HumanMessage(question));
@@ -1588,8 +2055,11 @@ async function handleSend() {
     } else {
       // Direct stuffing
       context = pageContent.text;
+      
+      // Use smart truncation if content is too large
       if (context.length > 50000) {
-        context = context.substring(0, 50000) + '... [content truncated]';
+        console.log('📝 Content exceeds 50k chars, applying markdown-aware truncation...');
+        context = await truncateMarkdownSafely(context, 50000);
       }
       
       const messageDiv = document.createElement('div');
@@ -1597,16 +2067,21 @@ async function handleSend() {
       typingIndicator.remove();
       messagesDiv.appendChild(messageDiv);
 
-      const stream = await chain.stream({
-        context: context,
-        question: question,
-        history: chatHistory,
-      });
+      try {
+        const stream = await chain.stream({
+          context: context,
+          question: question,
+          history: chatHistory,
+        });
 
-      for await (const chunk of stream) {
-        fullResponse += chunk;
-        renderMarkdownToElement(messageDiv, fullResponse);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        for await (const chunk of stream) {
+          fullResponse += chunk;
+          renderMarkdownToElement(messageDiv, fullResponse);
+          messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+      } catch (streamError) {
+        console.error('Stream error in stuffing mode:', streamError);
+        throw streamError;
       }
 
       chatHistory.push(new HumanMessage(question));
@@ -1624,6 +2099,7 @@ async function handleSend() {
   } catch (error) {
     console.error('Error in handleSend:', error);
     console.error('Error stack:', error.stack);
+    console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
     
     // Remove typing indicator if it still exists
     const indicator = messagesDiv.querySelector('.typing-indicator');
@@ -1632,22 +2108,34 @@ async function handleSend() {
     }
     
     // Handle specific error types
-    let errorMsg = error.message || 'Unknown error occurred';
+    let errorMsg = error.message || error.toString() || 'Unknown error occurred';
+    let errorString = JSON.stringify(error).toLowerCase();
     let toastTitle = 'Chat Error';
     
-    // Check for rate limit error (429)
-    if (errorMsg.includes('429') || errorMsg.includes('Too Many Requests')) {
-      errorMsg = 'API quota exceeded. Please wait before trying again.';
-      toastTitle = 'Quota Exceeded';
-      addMessage('🚫 **Your Gemini API Key Quota Has Been Reached**\n\n' +
-        '**What this means:**\n' +
-        '• You\'ve hit the free tier limit of 15 requests per minute\n' +
-        '• Your API key needs time to reset its quota\n\n' +
-        '**What to do:**\n' +
-        '• ⏱️ Wait 60 seconds and try again\n' +
-        '• 💡 Free tier: 15 requests/min, 1,500 requests/day\n' +
-        '• 🔗 Check your quota: [Google AI Studio](https://aistudio.google.com/apikey)\n' +
-        '• ⭐ Consider upgrading for higher limits', 'error');
+    console.log('Error message:', errorMsg);
+    console.log('Error string:', errorString);
+    
+    // Check for rate limit error (429) - check multiple sources
+    const isRateLimit = 
+      errorMsg.includes('429') || 
+      errorMsg.includes('Too Many Requests') ||
+      errorString.includes('429') ||
+      errorString.includes('too many requests') ||
+      (error.status && error.status === 429) ||
+      (error.response && error.response.status === 429);
+    
+    if (isRateLimit) {
+      console.log('🚨 Rate limit detected! Showing model switch prompt...');
+      errorMsg = 'Model rate limited. Switch to continue.';
+      toastTitle = 'Rate Limit Reached';
+      
+      // Store the failed question for retry after model switch
+      lastFailedQuestion = question;
+      
+      // Show model switch prompt
+      showModelSwitchPrompt();
+      
+      toast.warning(toastTitle, errorMsg, 5000);
     }
     // Check for service unavailable (503)
     else if (errorMsg.includes('503') || errorMsg.includes('Service Unavailable')) {
@@ -1680,6 +2168,10 @@ async function handleSend() {
     
     toast.error(toastTitle, errorMsg, 5000);
   } finally {
+    // Clear request ID on completion
+    activeRequestId = null;
+    console.log('✅ Request completed/failed');
+    
     sendBtn.disabled = false;
     userInput.focus();
   }

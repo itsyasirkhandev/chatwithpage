@@ -16,6 +16,7 @@ A sophisticated Chrome extension that enables AI-powered conversations about any
 - **Persistent Conversations** - Tab-based chat history with session storage
 - **Dynamic Content** - Handles JavaScript-rendered and SPA pages
 - **Smart Caching** - Instant reload - caches embeddings and summaries per page/URL
+- **Intelligent Rate Limit Handling** - Auto-detects 429 errors and offers model fallback with one click
 
 ### 🎯 Intelligent Processing
 - **4-Path Adaptive Routing** - Automatically selects optimal strategy based on document size
@@ -24,6 +25,9 @@ A sophisticated Chrome extension that enables AI-powered conversations about any
 - **LLM-Driven Auto-Escalation** - Seamlessly switches from summary to detailed retrieval when needed
 - **Cost Optimization** - Up to 87% cost reduction vs naive approaches
 - **Processing Cache** - No rebuilding on reopen - instant load from cache
+- **Markdown-Aware Splitting** - Respects document structure (headers, code blocks, lists) for better chunks
+- **Dynamic Chunk Sizing** - Automatically adjusts chunk size (500-2500) with 10-20% overlap based on document length
+- **Model Fallback Chain** - Seamless switching between 4 Gemini models when rate limited
 
 ### 🎨 Premium UI/UX
 - **Glassmorphic Design** - Modern frosted-glass aesthetic with backdrop blur
@@ -295,7 +299,7 @@ Different Page or URL Changed:
 - **MessagesPlaceholder** - Injects conversation history into prompts
 - **RunnableSequence** - Chains components together
 - **StringOutputParser** - Parses streaming text output
-- **RecursiveCharacterTextSplitter** - Splits documents into chunks (1000 tokens, 200 overlap)
+- **RecursiveCharacterTextSplitter** - Markdown-aware splitting with dynamic chunk sizing (500-2500 chars, 10-20% overlap)
 - **HumanMessage / AIMessage** - Message types for history
 
 ### Custom Implementation
@@ -488,11 +492,13 @@ This happens **automatically** without user intervention.
 
 ### API Errors & Rate Limits
 
-**"🚫 Your Gemini API Key Quota Has Been Reached"**
-- Free tier: 15 requests/minute, 1,500 requests/day
-- Wait 60 seconds before trying again
+**"🚫 Rate Limit Reached - Switch Model to Continue"**
+- Extension detects rate limits instantly and offers to switch to next model
+- **Model fallback chain**: gemini-2.5-flash-lite → gemini-2.5-flash → gemini-2.0-flash-lite → gemini-2.0-flash
+- Click "Switch Model & Continue" to automatically retry with next model
+- If all models exhausted, wait 60 seconds and try again
+- Free tier limits: 15 requests/minute per model, 1,500 requests/day
 - Check quota: [Google AI Studio](https://aistudio.google.com/apikey)
-- Consider upgrading for higher limits
 
 **"🔧 Gemini API is temporarily unavailable (503)"**
 - Google's servers are overloaded (temporary)
@@ -567,13 +573,17 @@ This extension demonstrates several advanced RAG (Retrieval-Augmented Generation
 1. **Intelligent 4-Path Routing** - Automatically chooses between stuffing, hybrid, and RAG based on document size
 2. **Hybrid Summary+Search** - Novel approach combining summaries with retrieval for optimal cost/quality
 3. **LLM-Driven Auto-Escalation** - Intelligent detection of when to switch from summary to detailed retrieval
-4. **Smart Caching System** - Session-based cache for instant reload without API calls
+4. **Smart Caching System** - Session-based cache for instant reload without API calls (95-99% faster)
 5. **Token Optimization** - Multi-stage cleaning pipeline (Readability → DOMPurify → Turndown → 15 regex patterns)
 6. **In-Browser Vector Store** - Custom cosine similarity implementation requiring no external database
 7. **Parallel Processing** - Summary and embeddings generated simultaneously for 2x faster setup
 8. **Auth-Aware Extraction** - Uses browser cookies for authenticated pages (Notion, Gmail, paywalled sites)
 9. **Premium UI/UX** - Glassmorphic design, dark mode, toast notifications, processing indicators
 10. **Markdown Rendering** - Beautiful formatting with syntax highlighting and copy buttons
+11. **Markdown-Aware Splitting** - Respects document structure across all modes (headers, code blocks, lists, tables)
+12. **Dynamic Chunk Sizing** - Automatically adjusts chunk size and overlap (10-20%) based on document length
+13. **Smart Rate Limit Detection** - 3-guard system with cooldown, console clearing, and instant feedback
+14. **Model Fallback Chain** - Automatic model switching with one-click retry when rate limited
 
 **Performance**: 95-99% faster on reopen thanks to intelligent caching
 **Cost efficiency**: Up to 87% reduction compared to naive approaches while maintaining quality
