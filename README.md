@@ -1,5 +1,4 @@
 # Chat with Page ✨
-<img width="422" height="571" alt="chrome extension" src="https://github.com/user-attachments/assets/df2ca812-78fb-45c8-aed9-45b5915b0e73" />
 
 A sophisticated Chrome extension that enables AI-powered conversations about any webpage with advanced content extraction, intelligent routing, smart caching, and a premium glassmorphic UI. Built with LangChain, Google Gemini, and modern web technologies.
 
@@ -8,7 +7,8 @@ A sophisticated Chrome extension that enables AI-powered conversations about any
 ![Gemini](https://img.shields.io/badge/Google-Gemini%202.5-orange?logo=google)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
 
-
+## UI Preview
+<img width="422" height="571" alt="chrome extension" src="https://github.com/user-attachments/assets/df2ca812-78fb-45c8-aed9-45b5915b0e73" />
 
 ## ✨ Key Features
 
